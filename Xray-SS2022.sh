@@ -511,6 +511,51 @@ gen_ss2022_password() {
     fi
 }
 
+# 生成 SS SIP002 链接，结果存入变量 SS_LINK
+gen_ss_link() {
+    local raw="${SS_METHOD}:${SS_PASSWORD}"
+    local userinfo
+
+    if command -v openssl >/dev/null 2>&1; then
+        userinfo=$(printf '%s' "$raw" | openssl base64 | tr -d '\n=')
+    elif command -v base64 >/dev/null 2>&1; then
+        userinfo=$(printf '%s' "$raw" | base64 | tr -d '\n=')
+    else
+        userinfo=$(printf '%s' "$raw" | awk '
+        BEGIN {
+            b64="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+            for(i=0;i<256;i++) ord[sprintf("%c",i)]=i
+        }
+        {
+            n=split($0,c,"")
+            for(i=1;i<=n;i++) {
+                v=ord[c[i]]
+                for(j=7;j>=0;j--) bit[++bc]=(int(v/2^j))%2
+            }
+        }
+        END {
+            while(bc>=6) {
+                idx=0
+                for(j=1;j<=6;j++) idx=idx*2+bit[j]
+                for(j=1;j<=bc-6;j++) bit[j]=bit[j+6]
+                bc-=6
+                printf "%s", substr(b64,idx+1,1)
+            }
+            if(bc>0) {
+                while(bc<6) bit[++bc]=0
+                idx=0
+                for(j=1;j<=6;j++) idx=idx*2+bit[j]
+                printf "%s", substr(b64,idx+1,1)
+            }
+        }' | tr -d '\n=')
+    fi
+
+    local ss_host="$SS_SERVER"
+    echo "$SS_SERVER" | grep -q ":" && ss_host="[$SS_SERVER]"
+    local tag="SS2022-$(echo "$SS_SERVER" | sed 's/[^a-zA-Z0-9]/-/g')"
+    SS_LINK="ss://${userinfo}@${ss_host}:${SS_PORT}#${tag}"
+}
+
 # ================================================================
 # 生成 Xray 配置文件
 # ================================================================
@@ -1200,13 +1245,8 @@ print_summary() {
     echo ""
 
     # ---- 生成 SS 链接 (SIP002 标准) ----
-    # userinfo = base64( method : password )
-    local userinfo ss_link
-    userinfo=$(printf '%s:%s' "$SS_METHOD" "$SS_PASSWORD" | base64 | tr -d '\n=')
-    # 服务器地址：若含冒号（IPv6）则加方括号
-    local ss_host="$SS_SERVER"
-    echo "$SS_SERVER" | grep -q ":" && ss_host="[$SS_SERVER]"
-    ss_link="ss://${userinfo}@${ss_host}:${SS_PORT}#SS2022-$(echo "$SS_SERVER" | sed 's/[^a-zA-Z0-9]/-/g')"
+    gen_ss_link
+    local ss_link="$SS_LINK"
 
     echo -e "  ${CYAN}${BOLD}── SS 分享链接 ──${NC}"
     echo ""
