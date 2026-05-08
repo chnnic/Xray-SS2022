@@ -490,9 +490,9 @@ collect_config() {
     echo "  SOCKS认证: $SOCKS_USER / $SOCKS_PASS"
     echo "  分流模式:  $ROUTE_MODE"
     hr
-    ask "确认以上配置并开始安装? (y/N):"
+    ask "确认以上配置并开始安装? (Y/n):"
     read CONFIRM
-    [ "${CONFIRM:-n}" != "y" ] && [ "${CONFIRM:-n}" != "Y" ] && error "已取消"
+    [ "${CONFIRM:-y}" != "y" ] && [ "${CONFIRM:-y}" != "Y" ] && error "已取消"
 }
 
 gen_ss2022_password() {
