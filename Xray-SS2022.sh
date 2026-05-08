@@ -180,22 +180,31 @@ pkg_install() {
 # ================================================================
 install_deps() {
     step "安装基础依赖"
-    pkg_update
 
+    # 列出各系统将要安装的包
+    local pkg_list=""
+    local pkg_mgr=""
     case "$OS_TYPE" in
-        openwrt)
-            pkg_install wget-ssl ca-bundle unzip curl
-            ;;
-        debian)
-            pkg_install wget curl unzip ca-certificates iproute2
-            ;;
-        redhat)
-            pkg_install wget curl unzip ca-certificates iproute
-            ;;
-        alpine)
-            pkg_install wget curl unzip ca-certificates iproute2
-            ;;
+        openwrt) pkg_list="wget-ssl ca-bundle unzip curl";           pkg_mgr="opkg" ;;
+        debian)  pkg_list="wget curl unzip ca-certificates iproute2"; pkg_mgr="apt" ;;
+        redhat)  pkg_list="wget curl unzip ca-certificates iproute";  pkg_mgr="dnf/yum" ;;
+        alpine)  pkg_list="wget curl unzip ca-certificates iproute2"; pkg_mgr="apk" ;;
     esac
+
+    echo ""
+    echo "  将通过 ${pkg_mgr} 安装以下依赖包:"
+    echo ""
+    for pkg in $pkg_list; do
+        echo "    • $pkg"
+    done
+    echo ""
+    ask "确认安装以上依赖? (y/N):"
+    read DEP_CONFIRM
+    [ "${DEP_CONFIRM:-n}" != "y" ] && [ "${DEP_CONFIRM:-n}" != "Y" ] && \
+        error "已取消。如已手动安装依赖，请重新运行脚本。"
+
+    pkg_update
+    pkg_install $pkg_list
 }
 
 # ================================================================
@@ -326,7 +335,11 @@ install_geodata_generic() {
 # 安装透明代理防火墙依赖
 # ================================================================
 install_tproxy_deps() {
-    [ "$PROXY_MODE" != "tproxy" ] && return
+    # 只有需要 TProxy 的模式才安装内核模块
+    case "$PROXY_MODE" in
+        tproxy|tproxy_socks) ;;
+        *) return ;;
+    esac
     step "安装透明代理内核模块"
 
     case "$OS_TYPE" in
@@ -394,14 +407,63 @@ collect_config() {
 
     echo ""
     echo "  代理模式:"
-    echo "    1) 透明代理 TProxy  - 自动拦截全部流量，适合网关/路由器"
-    echo "    2) SOCKS5 / HTTP    - 手动配置代理，适合单机使用"
+    echo "    1) 透明代理 TProxy     - 自动拦截局域网全部流量，适合路由器/网关"
+    echo "    2) SOCKS5 + HTTP       - 提供代理端口，设备手动配置，适合单机"
+    echo "    3) TProxy + SOCKS5     - 透明代理 + 额外 SOCKS5 端口，两者并存"
+    echo "    4) Dokodemo 端口转发   - 将本地端口流量转发到指定目标，适合端口映射"
+    echo "    5) 仅安装不配置代理    - 只装 Xray，自行编辑配置文件"
     ask "选择代理模式 [默认 1]:"
     read PROXY_MODE_CHOICE
     case "${PROXY_MODE_CHOICE:-1}" in
         2) PROXY_MODE="socks" ;;
+        3) PROXY_MODE="tproxy_socks" ;;
+        4) PROXY_MODE="dokodemo" ;;
+        5) PROXY_MODE="none" ;;
         *) PROXY_MODE="tproxy" ;;
     esac
+
+    # 端口转发模式需要额外参数
+    if [ "$PROXY_MODE" = "dokodemo" ]; then
+        echo ""
+        ask "转发目标地址 (例: 8.8.8.8):"
+        read DOKO_TARGET_ADDR
+        [ -z "$DOKO_TARGET_ADDR" ] && DOKO_TARGET_ADDR="8.8.8.8"
+        ask "转发目标端口 (例: 53):"
+        read DOKO_TARGET_PORT
+        [ -z "$DOKO_TARGET_PORT" ] && DOKO_TARGET_PORT="53"
+        ask "本地监听端口 (例: 5300):"
+        read DOKO_LOCAL_PORT
+        [ -z "$DOKO_LOCAL_PORT" ] && DOKO_LOCAL_PORT="5300"
+        ask "转发协议 tcp/udp/tcp,udp [默认 tcp,udp]:"
+        read DOKO_NETWORK
+        DOKO_NETWORK="${DOKO_NETWORK:-tcp,udp}"
+        info "端口转发: 本机:$DOKO_LOCAL_PORT -> $DOKO_TARGET_ADDR:$DOKO_TARGET_PORT ($DOKO_NETWORK)"
+    fi
+
+    # SOCKS5 认证选项（模式2/3时询问）
+    if [ "$PROXY_MODE" = "socks" ] || [ "$PROXY_MODE" = "tproxy_socks" ]; then
+        echo ""
+        ask "SOCKS5 是否启用用户名密码认证? (y/N):"
+        read SOCKS_AUTH_CHOICE
+        if [ "${SOCKS_AUTH_CHOICE:-n}" = "y" ] || [ "${SOCKS_AUTH_CHOICE:-n}" = "Y" ]; then
+            SOCKS_AUTH="password"
+            ask "SOCKS5 用户名:"
+            read SOCKS_USER
+            [ -z "$SOCKS_USER" ] && SOCKS_USER="user"
+            ask "SOCKS5 密码:"
+            read SOCKS_PASS
+            [ -z "$SOCKS_PASS" ] && SOCKS_PASS="password"
+            info "SOCKS5 认证: $SOCKS_USER / $SOCKS_PASS"
+        else
+            SOCKS_AUTH="noauth"
+            SOCKS_USER=""
+            SOCKS_PASS=""
+        fi
+    else
+        SOCKS_AUTH="noauth"
+        SOCKS_USER=""
+        SOCKS_PASS=""
+    fi
 
     echo ""
     echo "  分流模式:"
@@ -422,6 +484,10 @@ collect_config() {
     echo "  加密:      $SS_METHOD"
     echo "  密码:      $SS_PASSWORD"
     echo "  代理模式:  $PROXY_MODE"
+    [ "$PROXY_MODE" = "dokodemo" ] && \
+    echo "  端口转发:  本机:$DOKO_LOCAL_PORT -> $DOKO_TARGET_ADDR:$DOKO_TARGET_PORT"
+    [ "$SOCKS_AUTH" = "password" ] && \
+    echo "  SOCKS认证: $SOCKS_USER / $SOCKS_PASS"
     echo "  分流模式:  $ROUTE_MODE"
     hr
     ask "确认以上配置并开始安装? (y/N):"
@@ -487,31 +553,38 @@ generate_config() {
     esac
 
     # ---- Inbound ----
-    if [ "$PROXY_MODE" = "tproxy" ]; then
-        INBOUND_JSON='{
+    # 构建 SOCKS5 认证段
+    if [ "$SOCKS_AUTH" = "password" ] && [ -n "$SOCKS_USER" ]; then
+        SOCKS_AUTH_JSON='"auth": "password",
+        "accounts": [{ "user": "'"$SOCKS_USER"'", "pass": "'"$SOCKS_PASS"'" }],'
+    else
+        SOCKS_AUTH_JSON='"auth": "noauth",'
+    fi
+
+    case "$PROXY_MODE" in
+        tproxy)
+            # 纯透明代理
+            INBOUND_JSON='{
       "tag": "tproxy-in",
       "port": '"$TPROXY_PORT"',
       "protocol": "dokodemo-door",
       "settings": { "network": "tcp,udp", "followRedirect": true },
-      "streamSettings": {
-        "sockopt": { "tproxy": "tproxy", "mark": 255 }
-      },
+      "streamSettings": { "sockopt": { "tproxy": "tproxy", "mark": 255 } },
       "sniffing": { "enabled": true, "destOverride": ["http","tls"] }
-    },
-    {
-      "tag": "socks-in",
-      "port": '"$SOCKS_PORT"',
-      "listen": "0.0.0.0",
-      "protocol": "socks",
-      "settings": { "auth": "noauth", "udp": true }
     }'
-    else
-        INBOUND_JSON='{
+            ;;
+
+        socks)
+            # 纯 SOCKS5 + HTTP 代理
+            INBOUND_JSON='{
       "tag": "socks-in",
       "port": '"$SOCKS_PORT"',
       "listen": "0.0.0.0",
       "protocol": "socks",
-      "settings": { "auth": "noauth", "udp": true }
+      "settings": {
+        '"$SOCKS_AUTH_JSON"'
+        "udp": true
+      }
     },
     {
       "tag": "http-in",
@@ -519,7 +592,81 @@ generate_config() {
       "listen": "0.0.0.0",
       "protocol": "http"
     }'
-    fi
+            ;;
+
+        tproxy_socks)
+            # 透明代理 + SOCKS5 并存
+            INBOUND_JSON='{
+      "tag": "tproxy-in",
+      "port": '"$TPROXY_PORT"',
+      "protocol": "dokodemo-door",
+      "settings": { "network": "tcp,udp", "followRedirect": true },
+      "streamSettings": { "sockopt": { "tproxy": "tproxy", "mark": 255 } },
+      "sniffing": { "enabled": true, "destOverride": ["http","tls"] }
+    },
+    {
+      "tag": "socks-in",
+      "port": '"$SOCKS_PORT"',
+      "listen": "0.0.0.0",
+      "protocol": "socks",
+      "settings": {
+        '"$SOCKS_AUTH_JSON"'
+        "udp": true
+      }
+    },
+    {
+      "tag": "http-in",
+      "port": '"$HTTP_PORT"',
+      "listen": "0.0.0.0",
+      "protocol": "http"
+    }'
+            ;;
+
+        dokodemo)
+            # 端口转发模式
+            INBOUND_JSON='{
+      "tag": "dokodemo-in",
+      "port": '"$DOKO_LOCAL_PORT"',
+      "listen": "0.0.0.0",
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "'"$DOKO_TARGET_ADDR"'",
+        "port": '"$DOKO_TARGET_PORT"',
+        "network": "'"$DOKO_NETWORK"'"
+      }
+    },
+    {
+      "tag": "socks-in",
+      "port": '"$SOCKS_PORT"',
+      "listen": "0.0.0.0",
+      "protocol": "socks",
+      "settings": { "auth": "noauth", "udp": true }
+    }'
+            ;;
+
+        none)
+            # 仅安装，留一个 SOCKS5 占位，用户自行修改
+            INBOUND_JSON='{
+      "tag": "socks-in",
+      "port": '"$SOCKS_PORT"',
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": { "auth": "noauth", "udp": true }
+    }'
+            ;;
+
+        *)
+            # 兜底: TProxy
+            INBOUND_JSON='{
+      "tag": "tproxy-in",
+      "port": '"$TPROXY_PORT"',
+      "protocol": "dokodemo-door",
+      "settings": { "network": "tcp,udp", "followRedirect": true },
+      "streamSettings": { "sockopt": { "tproxy": "tproxy", "mark": 255 } },
+      "sniffing": { "enabled": true, "destOverride": ["http","tls"] }
+    }'
+            ;;
+    esac
 
     # ---- 写入配置 ----
     cat > "$XRAY_CONF" << EOF
@@ -722,7 +869,10 @@ EOF
 # 透明代理防火墙规则
 # ================================================================
 setup_tproxy() {
-    [ "$PROXY_MODE" != "tproxy" ] && return
+    case "$PROXY_MODE" in
+        tproxy|tproxy_socks) ;;
+        *) return ;;
+    esac
     step "配置透明代理规则 ($FW_TYPE)"
 
     # 创建通用 tproxy 规则脚本
@@ -951,9 +1101,10 @@ show_status() {
     fi
     echo "  版本: \$(\$XRAY_BIN version 2>/dev/null | head -1)"
     echo ""
-    echo "  SOCKS5 代理 : 0.0.0.0:${SOCKS_PORT}"
-    echo "  HTTP  代理  : 0.0.0.0:${HTTP_PORT}"
-    echo "  TProxy 端口 : ${TPROXY_PORT}"
+    echo "  代理端口:"
+    echo "    SOCKS5  : 0.0.0.0:${SOCKS_PORT}"
+    echo "    HTTP    : 0.0.0.0:${HTTP_PORT}"
+    echo "    TProxy  : ${TPROXY_PORT} (透明代理)"
     hr
 }
 
@@ -978,6 +1129,7 @@ show_menu() {
     echo -e "\${CYAN}║\${NC}  7. 应用 TProxy 防火墙规则           \${CYAN}║\${NC}"
     echo -e "\${CYAN}║\${NC}  8. 清除 TProxy 防火墙规则           \${CYAN}║\${NC}"
     echo -e "\${CYAN}║\${NC}  9. 编辑配置文件 (vi)                \${CYAN}║\${NC}"
+    echo -e "\${CYAN}║\${NC}  s. 显示 SS 分享链接                 \${CYAN}║\${NC}"
     echo -e "\${CYAN}║\${NC}  0. 退出                             \${CYAN}║\${NC}"
     echo -e "\${CYAN}\${BOLD}╚══════════════════════════════════════╝\${NC}"
     printf "请输入选项: "
@@ -996,6 +1148,17 @@ while true; do
         7) [ -f "\$TPROXY_START" ] && sh "\$TPROXY_START" || warn "未找到 TProxy 脚本" ;;
         8) [ -f "\$TPROXY_STOP"  ] && sh "\$TPROXY_STOP"  || warn "未找到 TProxy 脚本" ;;
         9) vi \$XRAY_CONF ;;
+        s|S)
+            echo ""
+            if [ -f /etc/xray/ss-link.txt ]; then
+                echo -e "  \${CYAN}SS 分享链接:\${NC}"
+                echo ""
+                cat /etc/xray/ss-link.txt
+                echo ""
+            else
+                warn "未找到 SS 链接文件 /etc/xray/ss-link.txt"
+            fi
+            ;;
         0) exit 0 ;;
         *) warn "无效选项" ;;
     esac
@@ -1035,20 +1198,61 @@ print_summary() {
     echo -e "  ${GREEN}密码:${NC}       $SS_PASSWORD"
     echo -e "  ${GREEN}分流模式:${NC}   $ROUTE_MODE"
     echo ""
-    if [ "$PROXY_MODE" = "tproxy" ]; then
-        echo -e "  ${CYAN}透明代理:${NC}   自动拦截 (端口 $TPROXY_PORT)"
-        echo -e "  ${CYAN}SOCKS5:${NC}     路由器IP : $SOCKS_PORT"
-    else
-        echo -e "  ${CYAN}SOCKS5:${NC}     路由器IP : $SOCKS_PORT"
-        echo -e "  ${CYAN}HTTP:${NC}       路由器IP : $HTTP_PORT"
-    fi
+
+    # ---- 生成 SS 链接 (SIP002 标准) ----
+    # userinfo = base64( method : password )
+    local userinfo ss_link
+    userinfo=$(printf '%s:%s' "$SS_METHOD" "$SS_PASSWORD" | base64 | tr -d '\n=')
+    # 服务器地址：若含冒号（IPv6）则加方括号
+    local ss_host="$SS_SERVER"
+    echo "$SS_SERVER" | grep -q ":" && ss_host="[$SS_SERVER]"
+    ss_link="ss://${userinfo}@${ss_host}:${SS_PORT}#SS2022-$(echo "$SS_SERVER" | sed 's/[^a-zA-Z0-9]/-/g')"
+
+    echo -e "  ${CYAN}${BOLD}── SS 分享链接 ──${NC}"
+    echo ""
+    echo -e "  ${GREEN}${ss_link}${NC}"
+    echo ""
+    echo "  (可直接导入 v2rayN / Shadowrocket / sing-box 等客户端)"
+    echo ""
+    # 同时保存到文件
+    echo "$ss_link" > /etc/xray/ss-link.txt
+    echo -e "  链接已保存至: ${YELLOW}/etc/xray/ss-link.txt${NC}"
+    echo ""
+    echo -e "  ${CYAN}${BOLD}── 代理端口 ──${NC}"
+    case "$PROXY_MODE" in
+        tproxy)
+            echo -e "  ${CYAN}透明代理 TProxy:${NC}  端口 $TPROXY_PORT (自动拦截局域网流量)"
+            echo -e "  ${YELLOW}提示:${NC} 将下游设备网关指向本机 IP 即可透明代理"
+            ;;
+        socks)
+            echo -e "  ${CYAN}SOCKS5 代理:${NC}  0.0.0.0:$SOCKS_PORT"
+            echo -e "  ${CYAN}HTTP  代理:${NC}   0.0.0.0:$HTTP_PORT"
+            [ "$SOCKS_AUTH" = "password" ] && \
+            echo -e "  ${CYAN}SOCKS认证:${NC}    用户: $SOCKS_USER  密码: $SOCKS_PASS"
+            echo -e "  ${YELLOW}提示:${NC} 在浏览器/系统代理设置中填写上述地址和端口"
+            ;;
+        tproxy_socks)
+            echo -e "  ${CYAN}透明代理 TProxy:${NC}  端口 $TPROXY_PORT"
+            echo -e "  ${CYAN}SOCKS5 代理:${NC}      0.0.0.0:$SOCKS_PORT"
+            echo -e "  ${CYAN}HTTP  代理:${NC}        0.0.0.0:$HTTP_PORT"
+            [ "$SOCKS_AUTH" = "password" ] && \
+            echo -e "  ${CYAN}SOCKS认证:${NC}         用户: $SOCKS_USER  密码: $SOCKS_PASS"
+            ;;
+        dokodemo)
+            echo -e "  ${CYAN}端口转发:${NC}  本机:$DOKO_LOCAL_PORT  ->  $DOKO_TARGET_ADDR:$DOKO_TARGET_PORT  ($DOKO_NETWORK)"
+            echo -e "  ${CYAN}SOCKS5:${NC}    0.0.0.0:$SOCKS_PORT"
+            echo -e "  ${YELLOW}提示:${NC} 访问本机 $DOKO_LOCAL_PORT 端口将转发到目标地址"
+            ;;
+        none)
+            echo -e "  ${YELLOW}代理未配置${NC} - 请手动编辑配置文件后重启服务"
+            echo -e "  ${CYAN}配置文件:${NC}  $XRAY_CONF"
+            ;;
+    esac
     echo ""
     echo -e "  ${YELLOW}常用命令:${NC}"
-    echo "    xray-manager               # 管理菜单"
+    echo "    xray-manager                 # 管理菜单"
     echo "    cat /var/log/xray-error.log  # 查看日志"
-    echo "    sh $0 uninstall            # 卸载"
-    echo ""
-    echo -e "  ${YELLOW}配置文件:${NC} $XRAY_CONF"
+    echo "    sh $0 uninstall              # 卸载"
     echo ""
 }
 
@@ -1098,20 +1302,9 @@ uninstall() {
 }
 
 # ================================================================
-# 主流程
+# 完整安装流程（从菜单调用）
 # ================================================================
-main() {
-    clear
-    echo -e "${CYAN}${BOLD}"
-    echo "  ╔══════════════════════════════════════════════╗"
-    echo "  ║    Xray + SS2022 通用一键安装脚本             ║"
-    echo "  ║    OpenWrt / Debian / Ubuntu / CentOS        ║"
-    echo "  ║    Alpine / Armbian / Raspberry Pi OS        ║"
-    echo "  ╚══════════════════════════════════════════════╝"
-    echo -e "${NC}"
-
-    [ "$1" = "uninstall" ] || [ "$1" = "remove" ] && { uninstall; exit 0; }
-
+do_install() {
     check_root
     detect_os
     install_deps
@@ -1124,6 +1317,272 @@ main() {
     create_manager
     start_xray
     print_summary
+}
+
+# ================================================================
+# 更新配置（重新收集参数并重写配置文件）
+# ================================================================
+do_reconfig() {
+    check_root
+    detect_os
+    [ ! -f "$XRAY_BIN" ] && error "Xray 尚未安装，请先执行安装"
+    collect_config
+    generate_config
+    setup_tproxy
+    service_restart
+    info "配置已更新并重启服务"
+    print_summary
+}
+
+# ================================================================
+# 检测当前安装状态
+# ================================================================
+get_install_status() {
+    XRAY_INSTALLED=0
+    XRAY_RUNNING=0
+    [ -f "$XRAY_BIN" ] && XRAY_INSTALLED=1
+    pgrep -f "xray run" >/dev/null 2>&1 && XRAY_RUNNING=1
+}
+
+show_status_line() {
+    get_install_status
+    local install_str run_str
+    if [ "$XRAY_INSTALLED" = "1" ]; then
+        install_str="${GREEN}已安装${NC}"
+    else
+        install_str="${RED}未安装${NC}"
+    fi
+    if [ "$XRAY_RUNNING" = "1" ]; then
+        run_str="${GREEN}运行中${NC}"
+    else
+        run_str="${RED}未运行${NC}"
+    fi
+    echo -e " 当前状态：$install_str  |  服务：$run_str"
+}
+
+# ================================================================
+# 显示主菜单
+# ================================================================
+show_main_menu() {
+    clear
+    echo -e "${CYAN}${BOLD}"
+    echo " ============================================"
+    echo "       Xray + SS2022 管理脚本"
+    echo "   OpenWrt / Debian / Ubuntu / CentOS"
+    echo "   Alpine  / Armbian / Raspberry Pi OS"
+    echo " ============================================"
+    echo -e "${NC}"
+    echo " ─────────────────────────────────────────"
+    echo -e "  ${YELLOW}0.${NC} 更新脚本"
+    echo " ─────────────────────────────────────────"
+    echo -e "  ${YELLOW}1.${NC} 安装 Xray (SS2022)"
+    echo -e "  ${YELLOW}2.${NC} 更新 Xray 核心"
+    echo -e "  ${YELLOW}3.${NC} 卸载 Xray"
+    echo " ─────────────────────────────────────────"
+    echo -e "  ${YELLOW}4.${NC} 启动服务"
+    echo -e "  ${YELLOW}5.${NC} 停止服务"
+    echo -e "  ${YELLOW}6.${NC} 重启服务"
+    echo " ─────────────────────────────────────────"
+    echo -e "  ${YELLOW}7.${NC} 修改配置"
+    echo -e "  ${YELLOW}8.${NC} 查看配置"
+    echo -e "  ${YELLOW}9.${NC} 查看运行状态 / 日志"
+    echo -e "  ${YELLOW}s.${NC} 显示 SS 分享链接"
+    echo " ─────────────────────────────────────────"
+    echo -e "  ${YELLOW}11.${NC} 中国大陆 IP 屏蔽 (切换)"
+    echo -e "  ${YELLOW}12.${NC} 退出脚本"
+    echo " ─────────────────────────────────────────"
+    echo ""
+    show_status_line
+    echo ""
+    printf " 请输入数字 [0-12 / s]: "
+}
+
+# ================================================================
+# 更新 Xray 核心二进制
+# ================================================================
+do_update_xray() {
+    check_root
+    detect_os
+    [ ! -f "$XRAY_BIN" ] && error "Xray 尚未安装，请先执行安装 (选项 1)"
+    info "停止服务..."
+    service_stop 2>/dev/null || true
+    info "重新下载最新版本..."
+    install_xray_github
+    info "重启服务..."
+    service_start
+    info "更新完成: $($XRAY_BIN version 2>/dev/null | head -1)"
+}
+
+# ================================================================
+# 查看详细状态和日志
+# ================================================================
+do_status() {
+    detect_os
+    echo ""
+    hr
+    get_install_status
+    if [ "$XRAY_INSTALLED" = "1" ]; then
+        echo -e "  Xray 版本: $($XRAY_BIN version 2>/dev/null | head -1)"
+    fi
+    if [ "$XRAY_RUNNING" = "1" ]; then
+        echo -e "  运行状态: ${GREEN}运行中 ✓${NC}  PID: $(pgrep -f 'xray run' | head -1)"
+    else
+        echo -e "  运行状态: ${RED}未运行 ✗${NC}"
+    fi
+    hr
+    echo ""
+    echo "  最近 20 行错误日志:"
+    echo ""
+    if [ -f /var/log/xray-error.log ]; then
+        tail -20 /var/log/xray-error.log
+    else
+        echo "  (日志文件不存在)"
+    fi
+    echo ""
+    printf "  按 f 实时跟踪日志，其他键返回菜单: "
+    read LOG_CHOICE
+    [ "$LOG_CHOICE" = "f" ] || [ "$LOG_CHOICE" = "F" ] && \
+        tail -f /var/log/xray-error.log
+}
+
+# ================================================================
+# 查看配置
+# ================================================================
+do_show_config() {
+    [ ! -f "$XRAY_CONF" ] && { warn "配置文件不存在: $XRAY_CONF"; return; }
+    echo ""
+    hr
+    echo "  配置文件: $XRAY_CONF"
+    hr
+    # 只显示关键字段，不输出整个 JSON
+    echo ""
+    local server method password
+    server=$(grep -o '"address": *"[^"]*"' "$XRAY_CONF" | grep -v "127\|0\.0\.0\|1\.1\.1\|8\.8\|223\." | head -1 | sed 's/.*"\([^"]*\)"/\1/')
+    method=$(grep -o '"method": *"[^"]*"' "$XRAY_CONF" | head -1 | sed 's/.*"\([^"]*\)"/\1/')
+    password=$(grep -o '"password": *"[^"]*"' "$XRAY_CONF" | head -1 | sed 's/.*"\([^"]*\)"/\1/')
+    local sport
+    sport=$(grep -A5 '"protocol": *"shadowsocks"' "$XRAY_CONF" | grep '"port"' | head -1 | grep -o '[0-9]*')
+    echo -e "  ${CYAN}服务器:${NC}   $server"
+    echo -e "  ${CYAN}端口:${NC}     $sport"
+    echo -e "  ${CYAN}加密:${NC}     $method"
+    echo -e "  ${CYAN}密码:${NC}     $password"
+    echo ""
+    # SS 链接
+    if [ -f /etc/xray/ss-link.txt ]; then
+        echo -e "  ${CYAN}SS 链接:${NC}"
+        echo "  $(cat /etc/xray/ss-link.txt)"
+    fi
+    echo ""
+    hr
+    printf "  按 e 编辑配置文件，其他键返回: "
+    read EDIT_CHOICE
+    [ "$EDIT_CHOICE" = "e" ] || [ "$EDIT_CHOICE" = "E" ] && {
+        vi "$XRAY_CONF"
+        detect_os
+        service_restart
+        info "配置已重载"
+    }
+}
+
+# ================================================================
+# 中国大陆 IP 屏蔽切换
+# ================================================================
+do_toggle_cn_block() {
+    [ ! -f "$XRAY_CONF" ] && { warn "配置文件不存在，请先安装"; return; }
+
+    # 检测当前是否已有 cn 屏蔽规则
+    if grep -q '"geoip:cn"' "$XRAY_CONF" && grep -q '"block"' "$XRAY_CONF"; then
+        # 当前已开启 -> 关闭（把 cn block 规则删除）
+        echo ""
+        warn "当前已开启大陆 IP 屏蔽，是否关闭? (y/N):"
+        read TOGGLE_CONFIRM
+        [ "${TOGGLE_CONFIRM:-n}" != "y" ] && [ "${TOGGLE_CONFIRM:-n}" != "Y" ] && return
+        # 用 Python/sed 移除 cn block 规则行
+        sed -i '/geoip:cn.*block\|block.*geoip:cn/d' "$XRAY_CONF"
+        # 移除对应 block outbound（保守做法：仅提示用户）
+        info "已从路由规则中移除大陆 IP 屏蔽"
+    else
+        # 当前未开启 -> 开启
+        echo ""
+        info "将在路由规则中添加：中国大陆 IP -> block（直接丢弃）"
+        ask "确认开启? (y/N):"
+        read TOGGLE_CONFIRM
+        [ "${TOGGLE_CONFIRM:-n}" != "y" ] && [ "${TOGGLE_CONFIRM:-n}" != "Y" ] && return
+        # 在 routing.rules 第一条插入 cn block 规则
+        # 使用临时 Python 脚本处理 JSON（如有），否则用 sed 注入
+        local rule='      { "type": "field", "outboundTag": "block", "ip": ["geoip:cn"] },'
+        sed -i '/"rules": \[/a\'"$rule" "$XRAY_CONF"
+        info "已添加大陆 IP 屏蔽规则"
+    fi
+
+    detect_os
+    service_restart
+    info "服务已重启，规则生效"
+}
+
+# ================================================================
+# 更新脚本自身
+# ================================================================
+do_self_update() {
+    local script_path
+    script_path=$(readlink -f "$0")
+    info "尝试更新脚本: $script_path"
+    local tmp_new="/tmp/xray-install-new.sh"
+    # 这里填写你托管脚本的 URL，默认留空提示用户
+    local UPDATE_URL=""
+    if [ -z "$UPDATE_URL" ]; then
+        warn "未配置更新地址 UPDATE_URL，请手动替换脚本文件"
+        warn "脚本路径: $script_path"
+        return
+    fi
+    wget -O "$tmp_new" "$UPDATE_URL" --timeout=30 || { warn "下载失败"; return; }
+    chmod +x "$tmp_new"
+    mv "$tmp_new" "$script_path"
+    info "脚本已更新，请重新运行"
+    exit 0
+}
+
+# ================================================================
+# 主入口
+# ================================================================
+main() {
+    check_root
+    detect_os
+
+    while true; do
+        show_main_menu
+        read MENU_CHOICE
+        echo ""
+        case "$MENU_CHOICE" in
+            0)  do_self_update ;;
+            1)  do_install ;;
+            2)  do_update_xray ;;
+            3)  uninstall ;;
+            4)  service_start   && info "服务已启动" ;;
+            5)  service_stop    && info "服务已停止" ;;
+            6)  service_restart && info "服务已重启" ;;
+            7)  do_reconfig ;;
+            8)  do_show_config ;;
+            9)  do_status ;;
+            s|S)
+                echo ""
+                if [ -f /etc/xray/ss-link.txt ]; then
+                    echo -e "  ${CYAN}SS 分享链接:${NC}"
+                    echo ""
+                    echo -e "  ${GREEN}$(cat /etc/xray/ss-link.txt)${NC}"
+                    echo ""
+                else
+                    warn "尚未生成 SS 链接，请先完成安装"
+                fi
+                ;;
+            11) do_toggle_cn_block ;;
+            12) echo ""; info "退出"; exit 0 ;;
+            *)  warn "无效选项: $MENU_CHOICE" ;;
+        esac
+        echo ""
+        printf " 按回车键继续..."
+        read _PAUSE
+    done
 }
 
 main "$@"
